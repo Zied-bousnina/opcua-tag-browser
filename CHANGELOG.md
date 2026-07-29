@@ -1,6 +1,8 @@
-# Changelog
+## [0.1.1] - 2026-07-29
 
-## [0.1.0] - 2026-07-29
+### Added
+- README with usage guide, design notes, and version compatibility table
+- Expanded crate-level documentation
 
-Initial release: address-space browsing, tree scanning, node filtering,
-partial-scan reporting, and optional JSON tag caching.
+### Changed
+- `#![deny(rustdoc::broken_intra_doc_links)]` now enforced at build time
