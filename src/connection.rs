@@ -66,7 +66,7 @@ impl ConnectOptions {
 /// use opcua_tag_browser::{connect, ConnectOptions};
 ///
 /// # fn main() -> opcua_tag_browser::Result<()> {
-/// let session = connect("opc.tcp://192.168.201.2:4840", &ConnectOptions::default())?;
+/// let session = connect("opc.tcp://192.168.201.0:8080", &ConnectOptions::default())?;
 /// # Ok(())
 /// # }
 /// ```
