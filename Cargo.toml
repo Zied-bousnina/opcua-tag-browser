@@ -1,12 +1,11 @@
 [package]
 name = "opcua-tag-browser"
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
-authors = ["Zied Bousnina <ziedbousnina39@gmail.com>"]
 rust-version = "1.75"
-description = "Browse an OPC UA server's address space into a flat, serializable, cacheable tag list."
+description = "An OPC UA client for PLC data: browse the address space, subscribe, poll, and write values back."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Zied-bousnina/opcua-tag-browser.git"
+repository = "https://github.com/Zied-bousnina/opcua-tag-browser"
 documentation = "https://docs.rs/opcua-tag-browser"
 readme = "README.md"
 keywords = ["opcua", "plc", "scada", "industrial", "automation"]
@@ -18,11 +17,29 @@ opcua = { version = "0.12", features = ["client"] }
 serde = { version = "1", features = ["derive"] }
 log = "0.4"
 thiserror = "2"
+
 serde_json = { version = "1", optional = true }
+chrono = { version = "0.4", optional = true }
+ctrlc = { version = "3", optional = true }
+
+[dev-dependencies]
+env_logger = "0.11"
 
 [features]
-default = ["json-cache"]
+default = ["json-cache", "monitoring"]
 json-cache = ["dep:serde_json"]
+monitoring = []
+jsonl-sink = ["monitoring", "json-cache", "dep:chrono"]
+ctrl-c = ["dep:ctrlc"]
+full = ["monitoring", "json-cache", "jsonl-sink", "ctrl-c"]
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[example]]
+name = "collect"
+required-features = ["full"]
+
+[[example]]
+name = "write"
+required-features = ["monitoring"]

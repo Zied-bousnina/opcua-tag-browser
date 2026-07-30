@@ -6,10 +6,10 @@ use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 
-/// The read-side OPC UA session operations this crate needs.
+/// The OPC UA session operations this crate needs.
 ///
-/// Kept object safe so scanning logic can be exercised against a fake session
-/// in tests without a live server.
+/// Kept object safe so scanning and writing logic can be exercised against a
+/// fake session in tests without a live server.
 pub trait PlcSession: Send + Sync {
     /// Lists child nodes for the supplied browse descriptions.
     fn browse(
@@ -32,6 +32,12 @@ pub trait PlcSession: Send + Sync {
         max_age: f64,
     ) -> Result<Vec<DataValue>, StatusCode>;
 
+    /// Writes values to nodes on the server.
+    ///
+    /// The returned status codes correspond one to one with `nodes_to_write`;
+    /// an overall `Ok` does not mean every individual write succeeded.
+    fn write(&self, nodes_to_write: &[WriteValue]) -> Result<Vec<StatusCode>, StatusCode>;
+
     /// Closes the session and deletes its subscriptions server-side.
     ///
     /// Call this on shutdown: without it the server holds monitored items until
@@ -45,8 +51,8 @@ pub trait PlcSession: Send + Sync {
 /// A [`PlcSession`] backed by a live `opcua` client session.
 ///
 /// Every call is wrapped in [`catch_panic`], so a panic inside the `opcua`
-/// crate surfaces as [`StatusCode::BadUnexpectedError`] instead of tearing
-/// down the calling thread.
+/// crate surfaces as [`StatusCode::BadUnexpectedError`] instead of tearing down
+/// the calling thread.
 pub struct OpcUaSession {
     session: Arc<RwLock<Session>>,
 }
@@ -59,8 +65,8 @@ impl OpcUaSession {
 
     /// Returns the wrapped session.
     ///
-    /// Use this for operations outside this crate's scope, such as creating
-    /// subscriptions and monitored items, or calling `Session::run`.
+    /// Use this for operations outside this crate's scope, such as calling
+    /// server methods or reading history.
     pub fn inner(&self) -> &Arc<RwLock<Session>> {
         &self.session
     }
@@ -99,6 +105,10 @@ impl PlcSession for OpcUaSession {
         })
     }
 
+    fn write(&self, nodes_to_write: &[WriteValue]) -> Result<Vec<StatusCode>, StatusCode> {
+        catch_panic(|| self.session.read().write(nodes_to_write))
+    }
+
     fn close_session_and_delete_subscriptions(&self) -> Result<(), StatusCode> {
         catch_panic(|| self.session.read().close_session_and_delete_subscriptions())
     }
@@ -113,9 +123,7 @@ impl PlcSession for OpcUaSession {
 /// The `opcua` crate panics on some malformed server responses. In a long-lived
 /// data collector that would kill the worker thread, so it is converted to an
 /// error the caller can retry.
-pub fn catch_panic<T>(
-    f: impl FnOnce() -> Result<T, StatusCode>,
-) -> Result<T, StatusCode> {
+pub fn catch_panic<T>(f: impl FnOnce() -> Result<T, StatusCode>) -> Result<T, StatusCode> {
     panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
         log::error!("internal panic recovered: {}", panic_message(&payload));
         Err(StatusCode::BadUnexpectedError)

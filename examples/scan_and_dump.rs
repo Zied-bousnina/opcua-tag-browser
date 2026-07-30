@@ -16,7 +16,7 @@ fn main() -> opcua_tag_browser::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "opc.tcp://localhost:8080".to_string());
 
-    let raw = connect(&endpoint, &ConnectOptions::default())?;
+    let raw = connect(&endpoint, &ConnectOptions::insecure())?;
     let session: Arc<dyn PlcSession> = Arc::new(OpcUaSession::new(raw));
 
     let browser = OpcUaNodeBrowser::new(session.clone());

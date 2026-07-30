@@ -1,4 +1,4 @@
-//! Rendering OPC UA values and status codes as display strings.
+//! Rendering and interpreting OPC UA values.
 
 use opcua::client::prelude::{StatusCode, Variant};
 
@@ -6,7 +6,7 @@ use opcua::client::prelude::{StatusCode, Variant};
 ///
 /// Scalars render as their natural text form (`true`, `42`, `3.5`), arrays as
 /// `[a, b, c]`, and byte strings as lowercase hex with an `0x` prefix.
-/// Structured values are rendered as a placeholder, since decoding an
+/// Structured values render as a placeholder, since decoding an
 /// `ExtensionObject` requires the vendor's type dictionary.
 ///
 /// ```
@@ -67,5 +67,59 @@ pub fn format_quality(status: Option<StatusCode>) -> String {
         Some(s) if s.is_good() => "GOOD".to_string(),
         Some(s) if s.is_uncertain() => format!("UNCERTAIN ({})", s),
         Some(s) => format!("BAD ({})", s),
+    }
+}
+
+/// Interprets a [`Variant`] as a float, if it holds a number.
+///
+/// ```
+/// use opcua_tag_browser::variant_as_f64;
+/// use opcua_tag_browser::opcua::client::prelude::Variant;
+///
+/// assert_eq!(variant_as_f64(&Variant::Int32(42)), Some(42.0));
+/// assert_eq!(variant_as_f64(&Variant::Boolean(true)), None);
+/// ```
+pub fn variant_as_f64(variant: &Variant) -> Option<f64> {
+    match variant {
+        Variant::SByte(v) => Some(*v as f64),
+        Variant::Byte(v) => Some(*v as f64),
+        Variant::Int16(v) => Some(*v as f64),
+        Variant::UInt16(v) => Some(*v as f64),
+        Variant::Int32(v) => Some(*v as f64),
+        Variant::UInt32(v) => Some(*v as f64),
+        Variant::Int64(v) => Some(*v as f64),
+        Variant::UInt64(v) => Some(*v as f64),
+        Variant::Float(v) => Some(*v as f64),
+        Variant::Double(v) => Some(*v),
+        Variant::Variant(inner) => variant_as_f64(inner),
+        _ => None,
+    }
+}
+
+/// Interprets a [`Variant`] as a signed integer, if it holds an integral value.
+///
+/// Floats are rejected rather than truncated: silently dropping a fractional
+/// part is rarely what a caller wanted.
+pub fn variant_as_i64(variant: &Variant) -> Option<i64> {
+    match variant {
+        Variant::SByte(v) => Some(*v as i64),
+        Variant::Byte(v) => Some(*v as i64),
+        Variant::Int16(v) => Some(*v as i64),
+        Variant::UInt16(v) => Some(*v as i64),
+        Variant::Int32(v) => Some(*v as i64),
+        Variant::UInt32(v) => Some(*v as i64),
+        Variant::Int64(v) => Some(*v),
+        Variant::UInt64(v) => i64::try_from(*v).ok(),
+        Variant::Variant(inner) => variant_as_i64(inner),
+        _ => None,
+    }
+}
+
+/// Interprets a [`Variant`] as a boolean, if it holds one.
+pub fn variant_as_bool(variant: &Variant) -> Option<bool> {
+    match variant {
+        Variant::Boolean(v) => Some(*v),
+        Variant::Variant(inner) => variant_as_bool(inner),
+        _ => None,
     }
 }

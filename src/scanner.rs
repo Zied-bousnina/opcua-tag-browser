@@ -32,6 +32,20 @@ impl Default for ScanOptions {
     }
 }
 
+impl ScanOptions {
+    /// Sets the maximum recursion depth below the root node.
+    pub fn max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth;
+        self
+    }
+
+    /// Sets whether to descend into the children of `Variable` nodes.
+    pub fn descend_into_variables(mut self, yes: bool) -> Self {
+        self.descend_into_variables = yes;
+        self
+    }
+}
+
 /// The outcome of a scan, including the subtrees that could not be read.
 ///
 /// Partial results are reported rather than silently dropped: a scan that

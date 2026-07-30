@@ -1,141 +1,147 @@
-//! Turn an OPC UA server's address space into a flat, serializable, cacheable tag list.
+//! An OPC UA client for PLC data.
 //!
-//! Industrial OPC UA servers expose thousands of nodes in a deep hierarchy. Before you can
-//! subscribe to or poll anything, you have to walk that tree, work out which nodes are actual
-//! process data, and store the result so you are not rebrowsing on every restart. This crate
-//! does that part, and only that part.
-//!
-//! # Quick start
+//! Point a [`Collector`] at a PLC and it discovers every tag, subscribes to as
+//! many as the server will monitor, polls the rest, reconnects when the link
+//! drops, and streams every change to a sink you choose. [`TagClient`] reads
+//! and writes individual values on demand.
 //!
 //! ```no_run
-//! use opcua_tag_browser::opcua::client::prelude::NodeId;
-//! use opcua_tag_browser::{
-//!     connect, ConnectOptions, DefaultNodeFilter, JsonFileTagRepository, OpcUaNodeBrowser,
-//!     OpcUaSession, PlcSession, ScanOptions, TagRepository, TreeScanner,
-//! };
-//! use std::sync::Arc;
+//! use opcua_tag_browser::{Collector, TagChange};
 //!
 //! # fn main() -> opcua_tag_browser::Result<()> {
-//! let raw = connect("opc.tcp://192.168.201.0:8080", &ConnectOptions::default())?;
-//! let session: Arc<dyn PlcSession> = Arc::new(OpcUaSession::new(raw));
+//! Collector::new("line1", "opc.tcp://192.168.201.2:4840")
+//!     .insecure()
+//!     .sink(|e: &TagChange<'_>| println!("{} = {}", e.path(), e.value))
+//!     .run()
+//! # }
+//! ```
 //!
-//! let browser = OpcUaNodeBrowser::new(session.clone());
-//! let scanner = TreeScanner::new(&browser, &DefaultNodeFilter, ScanOptions::default());
-//! let report = scanner.scan(NodeId::objects_folder_id())?;
+//! # Selecting what to collect
 //!
-//! println!("discovered {} tags", report.tags.len());
-//! JsonFileTagRepository::new("plc_tags.json").save(&report.tags)?;
+//! A PLC may expose thousands of nodes, and servers cap how many can be
+//! monitored at once. Selecting fewer than the ceiling means everything arrives
+//! by subscription and polling never engages.
 //!
-//! let _ = session.close_session_and_delete_subscriptions();
+//! ```no_run
+//! # use opcua_tag_browser::Collector;
+//! # fn c() -> Collector { Collector::new("a", "b") }
+//! c().only(["Machine/Axis1/Speed", "Machine/Axis1/Position"]);
+//! c().matching("Machine/Axis*/Speed");
+//! c().select(|tag| tag.path.starts_with("Machine/") && !tag.path.contains("Diag"));
+//! ```
+//!
+//! # Writing values
+//!
+//! ```no_run
+//! use opcua_tag_browser::Collector;
+//!
+//! # fn main() -> opcua_tag_browser::Result<()> {
+//! let plc = Collector::new("line1", "opc.tcp://192.168.201.2:4840")
+//!     .insecure()
+//!     .client()?;
+//!
+//! plc.set("Machine/Axis1/Setpoint", 1500.0)?;
+//! plc.set("Machine/Enable", true)?;
+//!
+//! println!("{}", plc.get("Machine/Axis1/Speed")?);
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! # The pipeline
+//! [`TagClient`] is `Clone` and `Send`, so it can be moved into another thread
+//! while a collector's event loop runs.
 //!
-//! Four stages, each a separate trait so any one can be swapped or faked:
+//! # Security
 //!
-//! ```text
-//!   connect          →  PlcSession    open a session, contain panics
-//!   browse           →  NodeBrowser   list children, follow continuation points
-//!   filter + walk    →  NodeFilter    reject furniture, recurse, detect cycles
-//!                       TreeScanner
-//!   persist          →  TagRepository cache the flat result
+//! [`ConnectOptions::default`] signs and encrypts with `Basic256Sha256` and
+//! rejects untrusted server certificates. That fails against a server
+//! configured for plaintext, which is deliberate: calling
+//! [`Collector::insecure`] records the decision in your source instead of
+//! inheriting it from a default.
+//!
+//! ```
+//! use opcua_tag_browser::{ConnectOptions, Security};
+//! use opcua_tag_browser::opcua::client::prelude::SecurityPolicy;
+//!
+//! let secure = ConnectOptions::default()
+//!     .security(Security::SignAndEncrypt(SecurityPolicy::Basic256Sha256))
+//!     .user_name("collector", "hunter2");
 //! ```
 //!
-//! The traits are the point. [`NodeBrowser`] lets you drive [`TreeScanner`] against a fixture
-//! with no server running; [`NodeFilter`] lets vendor-specific junk-name conventions live in
-//! your code rather than in a match arm here; [`TagRepository`] lets the cache move to a
-//! database without touching the scanner.
+//! Sending a username over an unencrypted channel returns
+//! [`Error::InsecureCredentials`] rather than transmitting it, and
+//! [`Credentials`] redacts passwords in `Debug` output so they cannot reach a
+//! log by accident.
 //!
-//! # Design notes
+//! # Sinks
 //!
-//! ## Panics are contained, not propagated
+//! [`TagSink`] is the seam between the crate and your application; the crate
+//! decides nothing about where data goes. A closure implements it, and
+//! [`sinks::LogSink`] and [`sinks::JsonlSink`] ship ready to use.
 //!
-//! The `opcua` crate panics on some malformed server responses. In a collector that runs for
-//! months, an unwind on a worker thread is a silent outage. Every service call made through
-//! [`OpcUaSession`] is wrapped by [`catch_panic`], which converts the unwind into
-//! [`StatusCode::BadUnexpectedError`](opcua::client::prelude::StatusCode) so the caller can
-//! log it and retry.
+//! ```
+//! use opcua_tag_browser::{TagChange, TagSink};
 //!
-//! ## Partial scans are reported, not hidden
+//! struct Threshold;
 //!
-//! A scan that returns 2,400 tags because one subtree failed is indistinguishable from a
-//! healthy 2,400-tag scan unless the failure is surfaced. [`TreeScanner::scan`] therefore
-//! fails outright only when the root itself is unreachable; every deeper failure lands in
-//! [`ScanReport::skipped`] and the walk continues.
-//!
-//! ```no_run
-//! # use opcua_tag_browser::ScanReport;
-//! # fn demo(report: ScanReport) {
-//! if !report.is_complete() {
-//!     for (node_id, err) in &report.skipped {
-//!         eprintln!("unreadable subtree {node_id}: {err}");
+//! impl TagSink for Threshold {
+//!     fn tag_changed(&self, event: &TagChange<'_>) {
+//!         if event.as_f64().is_some_and(|v| v > 100.0) {
+//!             println!("{} is high: {}", event.path(), event.value);
+//!         }
 //!     }
 //! }
-//! # }
 //! ```
 //!
-//! ## Hierarchy is preserved as a path
+//! # Shutting down
 //!
-//! Flattening a tree normally throws away the structure you just spent thousands of round
-//! trips discovering. Each [`PlcTag`] keeps its slash-joined browse path from the scan root,
-//! so grouping and human-facing tag trees remain possible downstream.
+//! The crate never calls `process::exit`. In a binary,
+//! [`Collector::handle_ctrl_c`] wires up a handler; inside a larger
+//! application, take a [`CollectorHandle`] and stop it yourself.
 //!
-//! ## Logging goes through the `log` facade
+//! Closing sessions on exit matters more than it looks. A server does not learn
+//! an abandoned session is gone until it times out, and until then its
+//! monitored items still count against the budget.
 //!
-//! Nothing is printed to stdout. Scan progress is emitted at `debug` and `trace`, skipped
-//! subtrees at `warn`, and the final summary at `info`. Install any `log` implementation to
-//! see it:
+//! # Lower-level pieces
 //!
-//! ```text
-//! RUST_LOG=opcua_tag_browser=debug cargo run
-//! ```
+//! [`Collector`] composes parts that stay public. Reach for them when you want
+//! the address space but not the monitoring:
 //!
-//! # Out of scope
-//!
-//! Subscriptions, polling, value logging, and reconnection are deliberately absent. They carry
-//! tuning that is specific to a deployment — publishing intervals, monitored-item ceilings,
-//! batch sizes — and defaults that are correct for one server are misleading for another.
-//!
-//! Reach the underlying `opcua` session through [`OpcUaSession::inner`] for anything this
-//! crate does not cover.
-//!
-//! # Version compatibility
-//!
-//! This crate re-exports the [`opcua`] crate it was compiled against. Use that path rather
-//! than adding your own `opcua` dependency: the public API exposes `NodeId`, `StatusCode`,
-//! `Variant`, and `NodeClass`, and a version mismatch produces type errors that look unrelated
-//! to their cause.
-//!
-//! ```
-//! use opcua_tag_browser::opcua::client::prelude::{NodeId, Variant};
-//! ```
-//!
-//! | `opcua-tag-browser` | `opcua` |
+//! | Type | Role |
 //! | --- | --- |
-//! | `0.1` | `0.12` |
-//!
-//! One sharp edge worth knowing: `NodeId::new` is bounded on `T: 'static`, so a borrowed
-//! `&str` from a function parameter will not compile. String literals are fine; anything
-//! borrowed needs `.to_string()`.
-//!
-//! ```
-//! # use opcua_tag_browser::opcua::client::prelude::NodeId;
-//! fn make(id: &str) -> NodeId {
-//!     NodeId::new(2, id.to_string()) // `NodeId::new(2, id)` fails with E0521
-//! }
-//! ```
+//! | [`connect`] | open a session |
+//! | [`PlcSession`] | session operations, with `opcua` panics contained |
+//! | [`NodeBrowser`] | list a node's children, pagination handled |
+//! | [`NodeFilter`] | reject server furniture |
+//! | [`TreeScanner`] | walk the tree into [`PlcTag`] values |
+//! | [`TagSet`] | index tags for lookup by path, name, or glob |
+//! | [`TagRepository`] | cache the result |
 //!
 //! # Feature flags
 //!
-//! - **`json-cache`** *(default)* — enables [`JsonFileTagRepository`] and pulls in
-//!   `serde_json`. Disable it if you supply your own [`TagRepository`].
+//! | Feature | Default | Effect |
+//! | --- | --- | --- |
+//! | `monitoring` | yes | [`Collector`], [`TagClient`], subscriptions, polling |
+//! | `json-cache` | yes | [`JsonFileTagRepository`] and tag caching |
+//! | `jsonl-sink` | no | [`sinks::JsonlSink`] and [`Collector::jsonl`] |
+//! | `ctrl-c` | no | [`Collector::handle_ctrl_c`] |
+//! | `full` | no | all of the above |
+//!
+//! # Version compatibility
+//!
+//! This crate re-exports the [`opcua`] crate it was built against. Use that
+//! path rather than your own `opcua` dependency, or a version mismatch produces
+//! type errors that look unrelated to their cause.
+//!
+//! | `opcua-tag-browser` | `opcua` |
+//! | --- | --- |
+//! | `0.2` | `0.12` |
+//! | `0.1` | `0.12` |
 //!
 //! # Minimum supported Rust version
 //!
-//! 1.75. Raising it is treated as a breaking change and will come with a minor version bump
-//! while the crate is pre-1.0.
+//! 1.75. Raising it is a breaking change.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -148,28 +154,72 @@ mod filter;
 mod scanner;
 mod session;
 mod tag;
+mod tagset;
 mod variant;
 
 #[cfg(feature = "json-cache")]
 mod repository;
 
+#[cfg(feature = "monitoring")]
+mod collector;
+#[cfg(feature = "monitoring")]
+mod monitor;
+#[cfg(feature = "monitoring")]
+mod sink;
+#[cfg(feature = "monitoring")]
+pub mod sinks;
+#[cfg(feature = "monitoring")]
+mod writer;
+
 pub use browser::{BrowsedNode, NodeBrowser, OpcUaNodeBrowser};
-pub use connection::{connect, ConnectOptions};
+pub use connection::{connect, ConnectOptions, Credentials, Security};
 pub use error::{Error, Result};
 pub use filter::{AcceptAll, DefaultNodeFilter, NodeFilter};
 pub use scanner::{ScanOptions, ScanReport, TreeScanner};
 pub use session::{catch_panic, panic_message, OpcUaSession, PlcSession};
 pub use tag::PlcTag;
-pub use variant::{format_quality, format_variant};
+pub use tagset::TagSet;
+pub use variant::{
+    format_quality, format_variant, variant_as_bool, variant_as_f64, variant_as_i64,
+};
 
 #[cfg(feature = "json-cache")]
 pub use repository::{JsonFileTagRepository, TagRepository};
 
+#[cfg(feature = "monitoring")]
+pub use collector::{Collector, CollectorHandle};
+#[cfg(feature = "monitoring")]
+pub use monitor::MonitorOptions;
+#[cfg(feature = "monitoring")]
+pub use sink::{ConnectionChange, Source, TagChange, TagSink};
+#[cfg(feature = "monitoring")]
+pub use writer::TagClient;
+
+/// Scans an endpoint and returns its tags.
+///
+/// Convenience over [`Collector::discover`] for a one-off look at a server.
+/// Connects insecurely and does not cache.
+///
+/// ```no_run
+/// let tags = opcua_tag_browser::discover("opc.tcp://192.168.201.2:4840")?;
+/// for tag in tags.iter().take(20) {
+///     println!("{}", tag.path);
+/// }
+/// # Ok::<(), opcua_tag_browser::Error>(())
+/// ```
+#[cfg(all(feature = "monitoring", feature = "json-cache"))]
+pub fn discover(endpoint_url: &str) -> Result<TagSet> {
+    Collector::new("discover", endpoint_url)
+        .insecure()
+        .no_cache()
+        .discover()
+}
+
 /// The `opcua` crate this library was compiled against.
 ///
-/// The public API exposes `NodeId`, `StatusCode`, `Variant`, and `NodeClass` from it. Use this
-/// re-export rather than declaring your own `opcua` dependency, or a version mismatch will
-/// produce type errors that appear unrelated to the real cause.
+/// The public API exposes `NodeId`, `StatusCode`, `Variant`, `NodeClass`, and
+/// `SecurityPolicy` from it. Use this re-export rather than declaring your own
+/// `opcua` dependency.
 ///
 /// ```
 /// use opcua_tag_browser::opcua::client::prelude::NodeId;

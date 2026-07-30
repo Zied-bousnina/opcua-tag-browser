@@ -18,7 +18,7 @@ pub trait NodeFilter {
 
 impl<F> NodeFilter for F
 where
-    F: Fn(&str) -> bool,
+    F: Fn(&str) -> bool + Send + Sync,
 {
     fn accepts(&self, display_name: &str) -> bool {
         self(display_name)

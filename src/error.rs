@@ -3,7 +3,8 @@
 use opcua::client::prelude::StatusCode;
 use std::path::PathBuf;
 
-/// Errors produced while connecting to, browsing, or caching an OPC UA address space.
+/// Errors produced while connecting to, browsing, monitoring, or writing to an
+/// OPC UA server.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -50,9 +51,53 @@ pub enum Error {
         source: serde_json::Error,
     },
 
-    /// A panic raised inside the `opcua` crate was caught and converted into an error.
+    /// A panic raised inside the `opcua` crate was caught and converted.
     #[error("internal panic inside the opcua crate: {0}")]
     InternalPanic(String),
+
+    /// A collector was run without a sink.
+    #[error("no sink configured: call Collector::sink before run")]
+    MissingSink,
+
+    /// A sink could not be initialized.
+    #[error("could not set up sink: {0}")]
+    SinkSetup(String),
+
+    /// Credentials would have been sent over an unencrypted channel.
+    #[error("refusing to send credentials without encryption: set Security::SignAndEncrypt")]
+    InsecureCredentials,
+
+    /// No tag matched the supplied browse path or display name.
+    #[error("no tag named {path}")]
+    UnknownTag {
+        /// The path or name that was looked up.
+        path: String,
+    },
+
+    /// A node ID string could not be parsed.
+    #[error("{node_id} is not a valid node id")]
+    BadNodeId {
+        /// The string that failed to parse.
+        node_id: String,
+    },
+
+    /// A `Write` service call failed.
+    #[error("write to {node_id} failed: {status}")]
+    Write {
+        /// Node that was being written.
+        node_id: String,
+        /// Status code returned by the server.
+        status: StatusCode,
+    },
+
+    /// A `Read` service call failed.
+    #[error("read of {node_id} failed: {status}")]
+    Read {
+        /// Node that was being read.
+        node_id: String,
+        /// Status code returned by the server.
+        status: StatusCode,
+    },
 }
 
 /// Convenience alias for results returned by this crate.

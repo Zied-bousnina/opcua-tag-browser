@@ -14,7 +14,7 @@ does that part, and only that part.
 
 ```toml
 [dependencies]
-opcua-tag-browser = "0.1"
+opcua-tag-browser = "0.2"
 ```
 
 ## Quick start
@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 fn main() -> opcua_tag_browser::Result<()> {
     // 1. Open a session.
-    let raw = connect("opc.tcp://192.168.201.0:8080", &ConnectOptions::default())?;
+    let raw = connect("opc.tcp://192.168.201.0:8080", &ConnectOptions::insecure())?;
     let session: Arc<dyn PlcSession> = Arc::new(OpcUaSession::new(raw));
 
     // 2. Walk the address space.
@@ -84,7 +84,7 @@ Use [`OpcUaSession::inner`] to reach the underlying `opcua` session for those:
 ```rust,no_run
 # use opcua_tag_browser::{connect, ConnectOptions, OpcUaSession};
 # fn main() -> opcua_tag_browser::Result<()> {
-let raw = connect("opc.tcp://localhost:4840", &ConnectOptions::default())?;
+let raw = connect("opc.tcp://localhost:4840", &ConnectOptions::insecure())?;
 let session = OpcUaSession::new(raw);
 
 // Anything this crate does not cover, do directly on the inner session.
@@ -237,18 +237,23 @@ unrelated to the real cause.
 
 | `opcua-tag-browser` | `opcua` |
 | --- | --- |
+| `0.2` | `0.12` |
 | `0.1` | `0.12` |
 
 ## Feature flags
 
 | Feature | Default | Effect |
 | --- | --- | --- |
+| `monitoring` | yes | `Collector`, `TagClient`, subscriptions, and polling. |
 | `json-cache` | yes | Enables [`JsonFileTagRepository`] and the `serde_json` dependency. |
+| `jsonl-sink` | no | `sinks::JsonlSink` and `Collector::jsonl`. |
+| `ctrl-c` | no | `Collector::handle_ctrl_c`. |
+| `full` | no | All of the above. |
 
 Disable default features if you supply your own [`TagRepository`]:
 
 ```toml
-opcua-tag-browser = { version = "0.1", default-features = false }
+opcua-tag-browser = { version = "0.2", default-features = false }
 ```
 
 ## Requirements
