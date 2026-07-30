@@ -16,7 +16,7 @@
 //! use std::sync::Arc;
 //!
 //! # fn main() -> opcua_tag_browser::Result<()> {
-//! let raw = connect("opc.tcp://192.168.201.2:4840", &ConnectOptions::default())?;
+//! let raw = connect("opc.tcp://192.168.201.0:8080", &ConnectOptions::default())?;
 //! let session: Arc<dyn PlcSession> = Arc::new(OpcUaSession::new(raw));
 //!
 //! let browser = OpcUaNodeBrowser::new(session.clone());

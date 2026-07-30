@@ -95,6 +95,31 @@ fn cyclic_references_terminate() {
 }
 
 #[test]
+fn shared_node_is_expanded_under_every_path() {
+    // NodeId 9 is reachable as both /F/H and /B/H. The spec requires each
+    // browse path be treated as a distinct node.
+    let root = NodeId::new(2, "root");
+    let f = node("f", "F", NodeClass::Object);
+    let b = node("b", "B", NodeClass::Object);
+    let shared = node("shared", "H", NodeClass::Object);
+    let leaf = node("leaf", "Value", NodeClass::Variable);
+
+    let browser = FakeBrowser::new()
+        .with(&root, vec![f.clone(), b.clone()])
+        .with(&f.node_id, vec![shared.clone()])
+        .with(&b.node_id, vec![shared.clone()])
+        .with(&shared.node_id, vec![leaf]);
+
+    let report = TreeScanner::new(&browser, &AcceptAll, ScanOptions::default())
+        .scan(root)
+        .unwrap();
+
+    let paths: Vec<&str> = report.tags.iter().map(|t| t.path.as_str()).collect();
+    assert!(paths.contains(&"F/H/Value"), "got {paths:?}");
+    assert!(paths.contains(&"B/H/Value"), "got {paths:?}");
+}
+
+#[test]
 fn depth_limit_is_respected() {
     let root = NodeId::new(2, "root");
     let level1 = node("l1", "L1", NodeClass::Object);

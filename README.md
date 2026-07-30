@@ -50,7 +50,7 @@ fn main() -> opcua_tag_browser::Result<()> {
 }
 ```
 
-Run the bundled example against your own server:
+Run the bundled example against your own serverr:
 
 ```bash
 RUST_LOG=info cargo run --example scan_and_dump -- opc.tcp://192.168.201.0:8080

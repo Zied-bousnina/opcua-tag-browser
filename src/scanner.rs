@@ -5,7 +5,6 @@ use crate::error::{Error, Result};
 use crate::filter::NodeFilter;
 use crate::tag::PlcTag;
 use opcua::client::prelude::{NodeClass, NodeId};
-use std::collections::HashSet;
 
 /// Tuning knobs for a scan.
 #[derive(Debug, Clone)]
@@ -108,10 +107,9 @@ impl<'a> TreeScanner<'a> {
         let children = self.browser.children_of(&root)?;
 
         let mut report = ScanReport::default();
-        let mut visited = HashSet::new();
-        visited.insert(root.to_string());
+        let mut ancestors = vec![root.to_string()];
 
-        self.walk(children, "", 1, &mut visited, &mut report);
+        self.walk(children, "", 1, &mut ancestors, &mut report);
 
         log::info!(
             "scan finished: {} tags, {} subtrees skipped",
@@ -127,7 +125,7 @@ impl<'a> TreeScanner<'a> {
         children: Vec<BrowsedNode>,
         parent_path: &str,
         depth: usize,
-        visited: &mut HashSet<String>,
+        ancestors: &mut Vec<String>,
         report: &mut ScanReport,
     ) {
         if depth > self.options.max_depth {
@@ -161,19 +159,22 @@ impl<'a> TreeScanner<'a> {
 
             // Guard against reference cycles in the address space.
             let key = child.node_id.to_string();
-            if !visited.insert(key.clone()) {
+            if ancestors.contains(&key) {
+                log::trace!("cycle at {key}, not descending");
                 continue;
             }
 
+            ancestors.push(key.clone());
             match self.browser.children_of(&child.node_id) {
                 Ok(grandchildren) => {
-                    self.walk(grandchildren, &path, depth + 1, visited, report)
+                    self.walk(grandchildren, &path, depth + 1, ancestors, report)
                 }
                 Err(e) => {
-                    log::warn!("skipping subtree {}: {}", key, e);
+                    log::warn!("skipping subtree {key}: {e}");
                     report.skipped.push((key, e));
                 }
             }
+            ancestors.pop();
         }
     }
 }
