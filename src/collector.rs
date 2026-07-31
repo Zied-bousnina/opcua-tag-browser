@@ -441,6 +441,7 @@ impl Collector {
         // stuck until its retry budget (`ConnectOptions::session_retry_limit`)
         // is exhausted, which can be tens of seconds against an unreachable
         // PLC. `_attempt_guard` marks `attempt_stop` once this returns.
+        let raw_for_disconnect = raw.clone();
         let session_thread = thread::spawn(move || {
             panic::catch_unwind(AssertUnwindSafe(|| Session::run(raw)))
         });
@@ -450,13 +451,23 @@ impl Collector {
                 break;
             }
             if self.stop.load(Ordering::Relaxed) {
-                log::warn!(
-                    "[{}] stopping while still retrying a reconnect; abandoning that attempt \
-                     rather than waiting for its retry budget",
-                    self.name
-                );
-                // Not joined: the thread is left to die with the process
-                // (or, worst case, once its own retry budget runs out).
+                log::debug!("[{}] stop requested; disconnecting session thread", self.name);
+                // Calling disconnect() causes Session::run() to exit its internal
+                // retry loop instead of waiting out the full retry budget.
+                raw_for_disconnect.write().disconnect();
+                // Give it a short window to exit cleanly before we abandon it.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !session_thread.is_finished() {
+                    if std::time::Instant::now() >= deadline {
+                        log::warn!(
+                            "[{}] session thread did not exit within 2 s; abandoning",
+                            self.name
+                        );
+                        break;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(50));
+                }
                 return Ok(());
             }
             thread::sleep(std::time::Duration::from_millis(100));
@@ -675,6 +686,10 @@ impl CollectorHandle {
                 Err(e) => log::warn!("[{name}] could not close session: {e}"),
             }
         }
+
+        // Give the disconnect signal time to propagate into the session state
+        // machine before the caller returns and the process potentially exits.
+        thread::sleep(std::time::Duration::from_millis(200));
     }
 
     /// Whether shutdown has been signalled.
