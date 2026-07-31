@@ -98,6 +98,16 @@ pub enum Error {
         /// Status code returned by the server.
         status: StatusCode,
     },
+
+    /// A write was refused because the tag's `AccessLevel` marks it read-only.
+    ///
+    /// Caught before the round trip: the server would otherwise return
+    /// `BadNotWritable` after the request already left.
+    #[error("{path} is not writable (AccessLevel does not permit CurrentWrite)")]
+    NotWritable {
+        /// The path or name that was looked up.
+        path: String,
+    },
 }
 
 /// Convenience alias for results returned by this crate.

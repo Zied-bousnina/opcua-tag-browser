@@ -1,6 +1,6 @@
 //! Scanner behaviour against a fake address space.
 
-use opcua_tag_browser::opcua::client::prelude::{NodeClass, NodeId};
+use opcua_tag_browser::opcua::client::prelude::{NodeClass, NodeId, ReferenceTypeId};
 use opcua_tag_browser::{
     AcceptAll, BrowsedNode, DefaultNodeFilter, NodeBrowser, ScanOptions, TreeScanner,
 };
@@ -34,7 +34,12 @@ impl NodeBrowser for FakeBrowser {
 }
 
 fn node(id: &str, name: &str, class: NodeClass) -> BrowsedNode {
-    BrowsedNode::new(NodeId::new(2, id.to_string()), name, class)
+    BrowsedNode::new(NodeId::new(2, id.to_string()), name, name, class)
+}
+
+fn property(id: &str, browse_name: &str, display_name: &str, class: NodeClass) -> BrowsedNode {
+    BrowsedNode::new(NodeId::new(2, id.to_string()), display_name, browse_name, class)
+        .with_reference_type(ReferenceTypeId::HasProperty.into())
 }
 
 #[test]
@@ -137,4 +142,59 @@ fn depth_limit_is_respected() {
         .unwrap();
 
     assert!(report.tags.is_empty());
+}
+
+#[test]
+fn path_is_built_from_browse_name_not_display_name() {
+    // A German-locale DisplayName must not leak into the browse path: per
+    // OPC 10000-3 6.2.5 the path is built from BrowseName, which stays
+    // stable across locales.
+    let root = NodeId::new(2, "root");
+    let speed = BrowsedNode::new(
+        NodeId::new(2, "speed"),
+        "Geschwindigkeit",
+        "Speed",
+        NodeClass::Variable,
+    );
+
+    let browser = FakeBrowser::new().with(&root, vec![speed]);
+
+    let report = TreeScanner::new(&browser, &AcceptAll, ScanOptions::default())
+        .scan(root)
+        .unwrap();
+
+    assert_eq!(report.tags[0].path, "Speed");
+    assert_eq!(report.tags[0].display_name, "Geschwindigkeit");
+}
+
+#[test]
+fn properties_are_excluded_by_default() {
+    let root = NodeId::new(2, "root");
+    let speed = node("speed", "Speed", NodeClass::Variable);
+    let units = property("units", "EngineeringUnits", "EngineeringUnits", NodeClass::Variable);
+
+    let browser = FakeBrowser::new().with(&root, vec![speed, units]);
+
+    let report = TreeScanner::new(&browser, &AcceptAll, ScanOptions::default())
+        .scan(root)
+        .unwrap();
+
+    assert_eq!(report.tags.len(), 1);
+    assert_eq!(report.tags[0].path, "Speed");
+}
+
+#[test]
+fn properties_are_included_when_requested() {
+    let root = NodeId::new(2, "root");
+    let speed = node("speed", "Speed", NodeClass::Variable);
+    let units = property("units", "EngineeringUnits", "EngineeringUnits", NodeClass::Variable);
+
+    let browser = FakeBrowser::new().with(&root, vec![speed, units]);
+
+    let options = ScanOptions::default().include_properties(true);
+    let report = TreeScanner::new(&browser, &AcceptAll, options)
+        .scan(root)
+        .unwrap();
+
+    assert_eq!(report.tags.len(), 2);
 }

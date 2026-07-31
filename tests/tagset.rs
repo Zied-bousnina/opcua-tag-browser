@@ -4,10 +4,10 @@ use opcua_tag_browser::{PlcTag, TagSet};
 
 fn fixture() -> TagSet {
     TagSet::new(vec![
-        PlcTag::new("Speed", "ns=2;s=a", "Variable", "Machine/Axis1/Speed"),
-        PlcTag::new("Position", "ns=2;s=b", "Variable", "Machine/Axis1/Position"),
-        PlcTag::new("Speed", "ns=2;s=c", "Variable", "Machine/Axis2/Speed"),
-        PlcTag::new("Temp", "ns=2;s=d", "Variable", "Oven/Temp"),
+        PlcTag::new("Speed", "Speed", "ns=2;s=a", "Variable", "Machine/Axis1/Speed"),
+        PlcTag::new("Position", "Position", "ns=2;s=b", "Variable", "Machine/Axis1/Position"),
+        PlcTag::new("Speed", "Speed", "ns=2;s=c", "Variable", "Machine/Axis2/Speed"),
+        PlcTag::new("Temp", "Temp", "ns=2;s=d", "Variable", "Oven/Temp"),
     ])
 }
 

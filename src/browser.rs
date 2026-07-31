@@ -13,8 +13,16 @@ pub struct BrowsedNode {
     pub node_id: NodeId,
     /// Text of the node's `DisplayName` attribute.
     pub display_name: String,
+    /// The node's `BrowseName`, namespace-qualified.
+    ///
+    /// Stable across server locales, unlike `display_name`.
+    pub browse_name: String,
     /// Class of the discovered node.
     pub node_class: NodeClass,
+    /// `TypeDefinition` node ID, when the browse returned one.
+    pub type_definition: Option<NodeId>,
+    /// Reference type that reached this node, when the browse returned one.
+    pub reference_type: Option<NodeId>,
 }
 impl BrowsedNode {
     /// Builds a browsed node record.
@@ -25,13 +33,29 @@ impl BrowsedNode {
     pub fn new(
         node_id: NodeId,
         display_name: impl Into<String>,
+        browse_name: impl Into<String>,
         node_class: NodeClass,
     ) -> Self {
         Self {
             node_id,
             display_name: display_name.into(),
+            browse_name: browse_name.into(),
             node_class,
+            type_definition: None,
+            reference_type: None,
         }
+    }
+
+    /// Sets the `TypeDefinition` node ID.
+    pub fn with_type_definition(mut self, type_definition: NodeId) -> Self {
+        self.type_definition = Some(type_definition);
+        self
+    }
+
+    /// Sets the reference type that reached this node.
+    pub fn with_reference_type(mut self, reference_type: NodeId) -> Self {
+        self.reference_type = Some(reference_type);
+        self
     }
 }
 
@@ -64,6 +88,9 @@ impl NodeBrowser for OpcUaNodeBrowser {
             reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
             include_subtypes: true,
             node_class_mask: 0,
+            // `All` already covers BrowseName, DisplayName, NodeClass,
+            // TypeDefinition, and ReferenceTypeId — everything this crate reads
+            // off a `ReferenceDescription`.
             result_mask: BrowseResultMask::All as u32,
         };
 
@@ -137,10 +164,15 @@ fn append_references(
 ) {
     let Some(references) = references else { return };
     for reference in references {
+        let type_definition = reference.type_definition.node_id.clone();
         out.push(BrowsedNode {
             node_id: reference.node_id.node_id.clone(),
             display_name: reference.display_name.text.to_string(),
+            browse_name: reference.browse_name.name.to_string(),
             node_class: reference.node_class,
+            type_definition: (!type_definition.is_null()).then_some(type_definition),
+            reference_type: (!reference.reference_type_id.is_null())
+                .then(|| reference.reference_type_id.clone()),
         });
     }
 }

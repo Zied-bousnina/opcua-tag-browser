@@ -37,7 +37,17 @@ impl TagClient {
     }
 
     /// Writes one value, addressing the tag by browse path or display name.
+    ///
+    /// Refused without a round trip if the tag's `AccessLevel` says it is
+    /// read-only.
     pub fn set(&self, path: &str, value: impl Into<Variant>) -> Result<()> {
+        if let Some(tag) = self.tags.find(path) {
+            if !tag.is_writable() {
+                return Err(Error::NotWritable {
+                    path: path.to_string(),
+                });
+            }
+        }
         let node_id = self.resolve(path)?;
         self.set_node(&node_id, value)
     }

@@ -161,6 +161,8 @@ mod variant;
 mod repository;
 
 #[cfg(feature = "monitoring")]
+mod attributes;
+#[cfg(feature = "monitoring")]
 mod collector;
 #[cfg(feature = "monitoring")]
 mod monitor;

@@ -4,7 +4,7 @@ use crate::browser::{BrowsedNode, NodeBrowser};
 use crate::error::{Error, Result};
 use crate::filter::NodeFilter;
 use crate::tag::PlcTag;
-use opcua::client::prelude::{NodeClass, NodeId};
+use opcua::client::prelude::{NodeClass, NodeId, ReferenceTypeId};
 
 /// Tuning knobs for a scan.
 #[derive(Debug, Clone)]
@@ -21,6 +21,13 @@ pub struct ScanOptions {
     /// Structured tags expose their members as child variables, so this is
     /// usually what you want. Turn it off to collect only top-level variables.
     pub descend_into_variables: bool,
+
+    /// Whether to include nodes reached via `HasProperty`.
+    ///
+    /// Properties are metadata (`EngineeringUnits`, `EURange`) rather than
+    /// process data, and on a typical server there is one such node per
+    /// variable — leaving this off roughly halves a scan's tag count.
+    pub include_properties: bool,
 }
 
 impl Default for ScanOptions {
@@ -28,6 +35,7 @@ impl Default for ScanOptions {
         Self {
             max_depth: 12,
             descend_into_variables: true,
+            include_properties: false,
         }
     }
 }
@@ -42,6 +50,12 @@ impl ScanOptions {
     /// Sets whether to descend into the children of `Variable` nodes.
     pub fn descend_into_variables(mut self, yes: bool) -> Self {
         self.descend_into_variables = yes;
+        self
+    }
+
+    /// Sets whether to include nodes reached via `HasProperty`.
+    pub fn include_properties(mut self, yes: bool) -> Self {
+        self.include_properties = yes;
         self
     }
 }
@@ -151,16 +165,24 @@ impl<'a> TreeScanner<'a> {
                 continue;
             }
 
-            let path = join_path(parent_path, &child.display_name);
+            if !self.options.include_properties && is_property(&child) {
+                continue;
+            }
+
+            let path = join_path(parent_path, &child.browse_name);
 
             let recurse = match child.node_class {
                 NodeClass::Variable => {
-                    report.tags.push(PlcTag::new(
+                    let mut tag = PlcTag::new(
                         child.display_name.clone(),
+                        child.browse_name.clone(),
                         child.node_id.to_string(),
                         format!("{:?}", child.node_class),
                         path.clone(),
-                    ));
+                    );
+                    tag.type_definition = child.type_definition.as_ref().map(ToString::to_string);
+                    tag.reference_type = child.reference_type.as_ref().map(ToString::to_string);
+                    report.tags.push(tag);
                     self.options.descend_into_variables
                 }
                 NodeClass::Object => true,
@@ -200,4 +222,13 @@ fn join_path(parent: &str, name: &str) -> String {
     } else {
         format!("{}/{}", parent, name)
     }
+}
+
+/// Whether a browsed node was reached via `HasProperty`.
+fn is_property(child: &BrowsedNode) -> bool {
+    let has_property: NodeId = ReferenceTypeId::HasProperty.into();
+    child
+        .reference_type
+        .as_ref()
+        .is_some_and(|r| *r == has_property)
 }

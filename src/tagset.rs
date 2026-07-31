@@ -15,8 +15,8 @@ use std::ops::Deref;
 /// use opcua_tag_browser::{PlcTag, TagSet};
 ///
 /// let tags = TagSet::new(vec![
-///     PlcTag::new("Speed", "ns=2;s=speed", "Variable", "Machine/Axis1/Speed"),
-///     PlcTag::new("Position", "ns=2;s=pos", "Variable", "Machine/Axis1/Position"),
+///     PlcTag::new("Speed", "Speed", "ns=2;s=speed", "Variable", "Machine/Axis1/Speed"),
+///     PlcTag::new("Position", "Position", "ns=2;s=pos", "Variable", "Machine/Axis1/Position"),
 /// ]);
 ///
 /// assert_eq!(tags.len(), 2);
@@ -72,9 +72,9 @@ impl TagSet {
     /// ```
     /// # use opcua_tag_browser::{PlcTag, TagSet};
     /// # let tags = TagSet::new(vec![
-    /// #     PlcTag::new("Speed", "ns=2;s=a", "Variable", "Machine/Axis1/Speed"),
-    /// #     PlcTag::new("Speed", "ns=2;s=b", "Variable", "Machine/Axis2/Speed"),
-    /// #     PlcTag::new("Temp", "ns=2;s=c", "Variable", "Oven/Temp"),
+    /// #     PlcTag::new("Speed", "Speed", "ns=2;s=a", "Variable", "Machine/Axis1/Speed"),
+    /// #     PlcTag::new("Speed", "Speed", "ns=2;s=b", "Variable", "Machine/Axis2/Speed"),
+    /// #     PlcTag::new("Temp", "Temp", "ns=2;s=c", "Variable", "Oven/Temp"),
     /// # ]);
     /// assert_eq!(tags.matching("Machine/*").len(), 2);
     /// assert_eq!(tags.matching("*/Speed").len(), 2);

@@ -54,6 +54,7 @@ pub struct Collector {
     connect_options: ConnectOptions,
     monitor_options: MonitorOptions,
     force_rescan: bool,
+    read_attributes: bool,
     deferred_error: Option<Error>,
     stop: Arc<AtomicBool>,
     sessions: Registry,
@@ -81,6 +82,7 @@ impl Collector {
             connect_options: ConnectOptions::default(),
             monitor_options: MonitorOptions::default(),
             force_rescan: false,
+            read_attributes: true,
             deferred_error: None,
             stop: Arc::new(AtomicBool::new(false)),
             sessions: Arc::new(Mutex::new(Vec::new())),
@@ -192,6 +194,18 @@ impl Collector {
     /// Ignores any cached tag list and rescans once.
     pub fn force_rescan(mut self, yes: bool) -> Self {
         self.force_rescan = yes;
+        self
+    }
+
+    /// Sets whether a fresh scan reads each tag's `DataType`, `ValueRank`,
+    /// `AccessLevel`, `MinimumSamplingInterval`, and `Historizing` attributes.
+    ///
+    /// On by default. These come from a `Read` pass separate from the
+    /// `Browse` that discovers tags, so turning this off skips one extra
+    /// round trip per scan at the cost of leaving [`PlcTag`]'s attribute
+    /// fields `None`. Has no effect when tags are loaded from cache.
+    pub fn read_attributes(mut self, yes: bool) -> Self {
+        self.read_attributes = yes;
         self
     }
 
@@ -400,7 +414,7 @@ impl Collector {
 
         log::info!("[{}] scanning address space", self.name);
 
-        let browser = OpcUaNodeBrowser::new(session);
+        let browser = OpcUaNodeBrowser::new(session.clone());
         let scanner = TreeScanner::new(&browser, self.filter.as_ref(), self.scan_options.clone());
         let report = scanner.scan(NodeId::objects_folder_id())?;
 
@@ -419,7 +433,11 @@ impl Collector {
 
         log::info!("[{}] discovered {} tags", self.name, report.tags.len());
 
-        let tags = report.into_tags();
+        let mut tags = report.into_tags();
+
+        if self.read_attributes {
+            crate::attributes::fill_variable_attributes(session.as_ref(), &mut tags);
+        }
 
         #[cfg(feature = "json-cache")]
         if let Some(cache) = &self.cache {

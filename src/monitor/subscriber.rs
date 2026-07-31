@@ -38,25 +38,35 @@ impl Subscriber {
     ///
     /// Rejected tags are not an error: the caller polls them instead.
     pub(crate) fn subscribe_all(&self, tags: &[PlcTag]) -> Vec<PlcTag> {
-        // queue_size 1 with discard_oldest keeps only the latest value per tag,
-        // which is what a change log wants.
-        let params = MonitoringParameters {
-            sampling_interval: self.options.sampling_interval.as_millis() as f64,
-            queue_size: 1,
-            discard_oldest: true,
-            ..Default::default()
-        };
+        let default_sampling = self.options.sampling_interval.as_millis() as f64;
 
         let requests: Vec<(&PlcTag, MonitoredItemCreateRequest)> = tags
             .iter()
             .filter_map(|tag| {
                 let node_id = NodeId::from_str(&tag.node_id).ok()?;
+                // Per OPC 10000-3 Table 13, a MinimumSamplingInterval of 0
+                // means "sample continuously" and a negative value means
+                // indeterminate; only a positive value overrides our default.
+                let sampling_interval = tag
+                    .min_sampling_interval
+                    .filter(|&ms| ms > 0.0)
+                    .unwrap_or(default_sampling);
+
+                // queue_size 1 with discard_oldest keeps only the latest
+                // value per tag, which is what a change log wants.
+                let params = MonitoringParameters {
+                    sampling_interval,
+                    queue_size: 1,
+                    discard_oldest: true,
+                    ..Default::default()
+                };
+
                 Some((
                     tag,
                     MonitoredItemCreateRequest::new(
                         ReadValueId::from(node_id),
                         MonitoringMode::Reporting,
-                        params.clone(),
+                        params,
                     ),
                 ))
             })
