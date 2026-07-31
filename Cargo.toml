@@ -1,6 +1,6 @@
 [package]
 name = "opcua-tag-browser"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.75"
 description = "An OPC UA client for PLC data: browse the address space, subscribe, poll, and write values back."

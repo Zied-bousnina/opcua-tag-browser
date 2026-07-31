@@ -1,3 +1,21 @@
+## [0.2.3] - 2026-07-31
+
+### Fixed
+
+- `CollectorHandle::stop` (and so Ctrl+C via `handle_ctrl_c`) could hang for
+  the length of the session's entire reconnect budget — up to
+  `session_retry_limit` x `session_retry_interval` — if it was called while
+  the underlying `opcua` session was actively retrying an unreachable server.
+  `Session::run` gives the `opcua` crate no way to interrupt it mid-retry, so
+  `Collector` now runs it on its own thread and stops waiting the moment
+  `stop` is requested, abandoning that thread rather than blocking on it.
+- The poller registered a new session in the shared registry on every
+  reconnect without removing the previous one. On a long-running collector
+  that had reconnected several times, `CollectorHandle::stop` would then try
+  to close each stale entry and log a `BadNotConnected` warning for every one
+  of them. Reconnecting now replaces the poller's registry entry instead of
+  accumulating another.
+
 ## [0.2.2] - 2026-07-31
 
 ### Added

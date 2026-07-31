@@ -434,15 +434,39 @@ impl Collector {
 
         log::info!("[{}] listening", self.name);
 
-        // `Session::run` owns this session; the poller has its own.
-        // `_attempt_guard` marks `attempt_stop` once this returns.
-        let outcome = panic::catch_unwind(AssertUnwindSafe(|| Session::run(raw)));
+        // `Session::run` blocks until the session ends — but the `opcua`
+        // crate gives us no way to interrupt it while it is actively
+        // retrying a dropped connection. Running it on its own thread lets
+        // us stop waiting the moment `self.stop` is set, instead of being
+        // stuck until its retry budget (`ConnectOptions::session_retry_limit`)
+        // is exhausted, which can be tens of seconds against an unreachable
+        // PLC. `_attempt_guard` marks `attempt_stop` once this returns.
+        let session_thread = thread::spawn(move || {
+            panic::catch_unwind(AssertUnwindSafe(|| Session::run(raw)))
+        });
 
-        if let Err(payload) = outcome {
-            return Err(Error::InternalPanic(crate::session::panic_message(&payload)));
+        loop {
+            if session_thread.is_finished() {
+                break;
+            }
+            if self.stop.load(Ordering::Relaxed) {
+                log::warn!(
+                    "[{}] stopping while still retrying a reconnect; abandoning that attempt \
+                     rather than waiting for its retry budget",
+                    self.name
+                );
+                // Not joined: the thread is left to die with the process
+                // (or, worst case, once its own retry budget runs out).
+                return Ok(());
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        Ok(())
+        match session_thread.join() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(payload)) => Err(Error::InternalPanic(crate::session::panic_message(&payload))),
+            Err(payload) => Err(Error::InternalPanic(crate::session::panic_message(&payload))),
+        }
     }
 
     // ---- internals -------------------------------------------------------
@@ -586,7 +610,11 @@ impl Collector {
                 backoff.reset();
 
                 let session: Arc<dyn PlcSession> = Arc::new(OpcUaSession::new(raw));
-                registry_lock(&sessions).push((name.clone(), session.clone()));
+                // Each reconnect replaces this poller's registry entry rather
+                // than accumulating one per attempt — otherwise a long-running
+                // collector that reconnects many times leaves `stop()` closing
+                // (and warning about) every stale session it ever opened.
+                replace_registry_entry(&sessions, &name, session.clone());
 
                 // Scoped to this session so the watchdog dies with it.
                 let session_stop = Arc::new(AtomicBool::new(false));
@@ -661,6 +689,19 @@ fn registry_lock(
     registry
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Drops any existing registry entries for `name` and inserts `session` in
+/// their place.
+///
+/// The stale entries are not closed here: whatever they were registered for
+/// has already ended (that is why a new one is being registered), so a close
+/// call against them would just repeat the same `BadNotConnected` this
+/// function exists to stop piling up.
+fn replace_registry_entry(registry: &Registry, name: &str, session: Arc<dyn PlcSession>) {
+    let mut sessions = registry_lock(registry);
+    sessions.retain(|(existing, _)| existing != name);
+    sessions.push((name.to_string(), session));
 }
 
 /// Sets an `AtomicBool` to `true` when dropped, regardless of which return
