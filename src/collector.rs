@@ -1,5 +1,6 @@
 //! One PLC, end to end.
 
+use crate::backoff::{sleep_interruptible, Backoff};
 use crate::browser::OpcUaNodeBrowser;
 use crate::connection::{connect, ConnectOptions};
 use crate::error::{Error, Result};
@@ -55,6 +56,7 @@ pub struct Collector {
     monitor_options: MonitorOptions,
     force_rescan: bool,
     read_attributes: bool,
+    resilient: bool,
     deferred_error: Option<Error>,
     stop: Arc<AtomicBool>,
     sessions: Registry,
@@ -83,6 +85,7 @@ impl Collector {
             monitor_options: MonitorOptions::default(),
             force_rescan: false,
             read_attributes: true,
+            resilient: true,
             deferred_error: None,
             stop: Arc::new(AtomicBool::new(false)),
             sessions: Arc::new(Mutex::new(Vec::new())),
@@ -209,6 +212,28 @@ impl Collector {
         self
     }
 
+    /// Sets whether `run()` restarts automatically when a run attempt ends
+    /// for a reason other than `CollectorHandle::stop`.
+    ///
+    /// On by default. A run attempt can end because the underlying `opcua`
+    /// session exhausted its reconnect budget
+    /// ([`ConnectOptions::session_retry_limit`]), or because of an internal
+    /// panic caught at the boundary. With `resilient` on, `Collector` treats
+    /// that the same way the poller already treats a dropped polling
+    /// session: log it, back off
+    /// ([`MonitorOptions::restart_backoff_min`]/`restart_backoff_max`), and
+    /// try again — a fresh connect, a fresh scan-or-cache-load, fresh
+    /// subscriptions — until `CollectorHandle::stop` is called or the failure
+    /// is one retrying cannot fix (bad credentials, a client that cannot be
+    /// built at all).
+    ///
+    /// Turn this off to get the old behavior: `run()` returns on the first
+    /// such failure.
+    pub fn resilient(mut self, yes: bool) -> Self {
+        self.resilient = yes;
+        self
+    }
+
     /// Replaces the node filter applied during scanning.
     pub fn filter(mut self, filter: Arc<dyn NodeFilter + Send + Sync>) -> Self {
         self.filter = filter;
@@ -286,6 +311,12 @@ impl Collector {
     }
 
     /// Runs until stopped. Blocks the calling thread.
+    ///
+    /// With [`resilient`](Self::resilient) on (the default), a run attempt
+    /// that ends for any recoverable reason is retried with backoff instead
+    /// of returning — see that method for exactly what counts as
+    /// recoverable. `run()` then only returns via `CollectorHandle::stop`, or
+    /// immediately on a non-recoverable setup error.
     pub fn run(mut self) -> Result<()> {
         if let Some(e) = self.deferred_error.take() {
             return Err(e);
@@ -293,15 +324,81 @@ impl Collector {
 
         let sink = self.sink.clone().ok_or(Error::MissingSink)?;
 
+        if !self.resilient {
+            return self.run_attempt(&sink);
+        }
+
+        let mut backoff = Backoff::new(
+            self.monitor_options.restart_backoff_min,
+            self.monitor_options.restart_backoff_max,
+        );
+
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
+            let attempt_started = std::time::Instant::now();
+
+            match self.run_attempt(&sink) {
+                Ok(()) => {
+                    // A clean return only happens via CollectorHandle::stop,
+                    // or because there was nothing to monitor — neither is
+                    // worth restarting for.
+                    return Ok(());
+                }
+                Err(e) if !e.is_recoverable() => {
+                    log::error!("[{}] {e}, not retrying", self.name);
+                    return Err(e);
+                }
+                Err(e) => {
+                    if self.stop.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+
+                    // An attempt that ran a good while before failing was
+                    // working; do not let a stale, escalated backoff punish
+                    // its next attempt.
+                    if attempt_started.elapsed() >= self.monitor_options.restart_backoff_max {
+                        backoff.reset();
+                    }
+
+                    let delay = backoff.next();
+                    log::error!(
+                        "[{}] {e}, restarting in {}ms",
+                        self.name,
+                        delay.as_millis()
+                    );
+                    sleep_interruptible(delay, &self.stop);
+                }
+            }
+        }
+    }
+
+    /// Connects, discovers tags, subscribes and polls, and blocks until the
+    /// session ends — by request, by giving up on reconnecting, or by panic.
+    ///
+    /// Every background thread spawned here (watchdog, poller) is scoped to
+    /// this attempt via `attempt_stop`, not the collector-wide stop flag, so
+    /// a caller in `run()` can start a fresh attempt afterward without
+    /// leaking the previous one's threads.
+    fn run_attempt(&self, sink: &Arc<dyn TagSink>) -> Result<()> {
+        let attempt_stop = Arc::new(AtomicBool::new(false));
+        // Declared in this order so drop runs `_attempt_guard` (which sets
+        // `attempt_stop`) before `_bridge` (which joins on it) — otherwise an
+        // early `?` return before anything sets `attempt_stop` would make the
+        // bridge thread's join wait forever.
+        let _bridge = spawn_stop_bridge(self.stop.clone(), attempt_stop.clone());
+        let _attempt_guard = SetTrueOnDrop(attempt_stop.clone());
+
         let (raw, session) = self.open(&self.name)?;
-        let _guard = StopOnDrop(self.stop.clone());
 
         spawn_watchdog(
             self.name.clone(),
             self.endpoint_url.clone(),
             session.clone(),
             sink.clone(),
-            self.stop.clone(),
+            attempt_stop.clone(),
             self.monitor_options.health_check_interval,
         );
 
@@ -333,12 +430,14 @@ impl Collector {
 
         let mut to_poll = remainder.to_vec();
         to_poll.extend(rejected);
-        self.spawn_poller(to_poll, sink);
+        self.spawn_poller(to_poll, sink.clone(), attempt_stop.clone());
 
         log::info!("[{}] listening", self.name);
 
         // `Session::run` owns this session; the poller has its own.
+        // `_attempt_guard` marks `attempt_stop` once this returns.
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| Session::run(raw)));
+
         if let Err(payload) = outcome {
             return Err(Error::InternalPanic(crate::session::panic_message(&payload)));
         }
@@ -448,7 +547,12 @@ impl Collector {
     }
 
     /// Runs the poller on its own thread and its own session.
-    fn spawn_poller(&self, tags: Vec<PlcTag>, sink: Arc<dyn TagSink>) {
+    ///
+    /// `stop` scopes this poller to one [`run_attempt`](Self::run_attempt):
+    /// it is set when that attempt ends, not only on collector shutdown, so
+    /// a restart does not leave the previous attempt's poller running
+    /// alongside the new one.
+    fn spawn_poller(&self, tags: Vec<PlcTag>, sink: Arc<dyn TagSink>, stop: Arc<AtomicBool>) {
         if tags.is_empty() {
             return;
         }
@@ -458,19 +562,28 @@ impl Collector {
         let connect_options = self.connect_options.clone();
         let monitor_options = self.monitor_options.clone();
         let sessions = self.sessions.clone();
-        let stop = self.stop.clone();
-        let delay = self.monitor_options.reconnect_delay;
+        let mut backoff = Backoff::new(
+            self.monitor_options.reconnect_backoff_min,
+            self.monitor_options.reconnect_delay,
+        );
 
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 let raw = match connect(&endpoint_url, &connect_options) {
                     Ok(raw) => raw,
                     Err(e) => {
-                        log::error!("[{name}] could not open polling session: {e}");
-                        thread::sleep(delay);
+                        let delay = backoff.next();
+                        log::error!(
+                            "[{name}] could not open polling session: {e}, retrying in {}ms",
+                            delay.as_millis()
+                        );
+                        sleep_interruptible(delay, &stop);
                         continue;
                     }
                 };
+
+                // A successful connect means the outage, if any, is over.
+                backoff.reset();
 
                 let session: Arc<dyn PlcSession> = Arc::new(OpcUaSession::new(raw));
                 registry_lock(&sessions).push((name.clone(), session.clone()));
@@ -497,9 +610,11 @@ impl Collector {
 
                 session_stop.store(true, Ordering::Relaxed);
 
+                // Retry immediately: the drop just happened, so the fastest
+                // path back to live data is trying right away. The backoff
+                // above only kicks in once connect() itself starts failing.
                 if !stop.load(Ordering::Relaxed) {
-                    log::warn!("[{name}] reconnecting in {}s", delay.as_secs());
-                    thread::sleep(delay);
+                    log::warn!("[{name}] connection lost, reconnecting");
                 }
             }
         });
@@ -548,11 +663,40 @@ fn registry_lock(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Signals background threads to stop when the pipeline unwinds.
-struct StopOnDrop(Arc<AtomicBool>);
+/// Sets an `AtomicBool` to `true` when dropped, regardless of which return
+/// path triggered the drop (including an early `?`).
+struct SetTrueOnDrop(Arc<AtomicBool>);
 
-impl Drop for StopOnDrop {
+impl Drop for SetTrueOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Mirrors `global_stop` into `attempt_stop`, so a per-attempt scope notices
+/// permanent shutdown without being the thing that causes it.
+///
+/// The bridge thread also exits as soon as `attempt_stop` is set directly
+/// (by the attempt ending on its own), so it never outlives the attempt it
+/// watches.
+fn spawn_stop_bridge(global_stop: Arc<AtomicBool>, attempt_stop: Arc<AtomicBool>) -> StopBridge {
+    let handle = thread::spawn(move || {
+        while !global_stop.load(Ordering::Relaxed) && !attempt_stop.load(Ordering::Relaxed) {
+            thread::sleep(std::time::Duration::from_millis(200));
+        }
+        attempt_stop.store(true, Ordering::Relaxed);
+    });
+    StopBridge(Some(handle))
+}
+
+/// Joins the bridge thread when a `run_attempt` scope ends, so restarts do
+/// not accumulate idle threads.
+struct StopBridge(Option<thread::JoinHandle<()>>);
+
+impl Drop for StopBridge {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = handle.join();
+        }
     }
 }

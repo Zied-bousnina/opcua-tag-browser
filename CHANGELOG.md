@@ -1,3 +1,29 @@
+## [0.2.2] - 2026-07-31
+
+### Added
+
+- `ConnectOptions::session_retry_limit` / `session_retry_interval`, controlling
+  how the underlying `opcua` session reconnects and re-attaches its existing
+  subscriptions after a dropped connection. Defaults raised from `opcua`'s own
+  10 retries / 10s apart to 20 retries / 2s apart.
+- `MonitorOptions::reconnect_backoff_min`, `restart_backoff_min`, and
+  `restart_backoff_max`: exponential-backoff-with-jitter tuning for the poller
+  and for `Collector`'s own restart loop
+- `Collector::resilient` (on by default): `run()` now restarts automatically
+  — fresh connect, fresh scan-or-cache-load, fresh subscriptions — whenever a
+  run attempt ends for a recoverable reason, instead of returning. Bad
+  credentials or a client that cannot be built at all still return
+  immediately, since retrying those can never succeed.
+- `Error::is_recoverable`
+
+### Changed
+
+- `MonitorOptions::health_check_interval` default lowered from 3s to 1s (the
+  check is a local flag read, not a network call, so this is free)
+- The poller's fixed `reconnect_delay` between attempts is now exponential
+  backoff starting at `reconnect_backoff_min`, so a short blip recovers almost
+  immediately instead of always waiting the full delay
+
 ## [0.2.1] - 2026-07-31
 
 Version-only release: `0.2.0` was already claimed on crates.io by an earlier

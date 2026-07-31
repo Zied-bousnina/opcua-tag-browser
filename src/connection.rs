@@ -161,6 +161,20 @@ pub struct ConnectOptions {
     pub security: Security,
     /// How the client identifies itself.
     pub credentials: Credentials,
+    /// How many times the underlying `opcua` session retries a dropped
+    /// connection before giving up, or `-1` for no limit.
+    ///
+    /// This governs the built-in reconnect loop `Collector::run` relies on:
+    /// when the connection drops, `opcua` reconnects and re-attaches existing
+    /// subscriptions on its own, without this crate's involvement. A finite
+    /// limit bounds how long `CollectorHandle::stop` can take to take effect
+    /// while a reconnect is in progress, at the cost of eventually giving up
+    /// on a long outage (`Collector`'s own restart loop then takes over).
+    pub session_retry_limit: i32,
+    /// Delay between reconnect attempts.
+    ///
+    /// Floored at 500ms by the underlying `opcua` crate.
+    pub session_retry_interval: std::time::Duration,
 }
 
 impl Default for ConnectOptions {
@@ -174,6 +188,8 @@ impl Default for ConnectOptions {
             verify_server_certs: true,
             security: Security::SignAndEncrypt(SecurityPolicy::Basic256Sha256),
             credentials: Credentials::Anonymous,
+            session_retry_limit: 20,
+            session_retry_interval: std::time::Duration::from_secs(2),
         }
     }
 }
@@ -244,6 +260,24 @@ impl ConnectOptions {
         self.trust_server_certs = yes;
         self
     }
+
+    /// Sets how many times a dropped connection is retried before giving up,
+    /// or `-1` for no limit.
+    ///
+    /// Values below `-1` are clamped to `-1`: the underlying `opcua` crate
+    /// panics on them rather than erroring, so this crate does not forward an
+    /// invalid value.
+    pub fn session_retry_limit(mut self, limit: i32) -> Self {
+        self.session_retry_limit = limit.max(-1);
+        self
+    }
+
+    /// Sets the delay between reconnect attempts. Floored at 500ms by the
+    /// underlying `opcua` crate.
+    pub fn session_retry_interval(mut self, interval: std::time::Duration) -> Self {
+        self.session_retry_interval = interval;
+        self
+    }
 }
 
 /// Connects to an endpoint using the supplied options.
@@ -276,6 +310,8 @@ pub fn connect(endpoint_url: &str, options: &ConnectOptions) -> Result<Arc<RwLoc
         .trust_server_certs(options.trust_server_certs)
         .verify_server_certs(options.verify_server_certs)
         .session_timeout(options.session_timeout_ms)
+        .session_retry_limit(options.session_retry_limit)
+        .session_retry_interval(options.session_retry_interval.as_millis() as u32)
         .client()
         .ok_or_else(|| Error::ClientBuild("ClientBuilder returned no client".to_string()))?;
 

@@ -110,5 +110,40 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Whether retrying the operation that produced this error has any
+    /// chance of succeeding.
+    ///
+    /// Used by [`Collector::run`](crate::Collector::run)'s resilient restart
+    /// loop to tell a transient failure (network blip, a slow server) from a
+    /// configuration mistake that will fail identically on every attempt —
+    /// retrying the latter forever would just spam the log.
+    pub fn is_recoverable(&self) -> bool {
+        !matches!(self, Error::InsecureCredentials | Error::ClientBuild(_))
+    }
+}
+
 /// Convenience alias for results returned by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_errors_are_not_recoverable() {
+        assert!(!Error::InsecureCredentials.is_recoverable());
+        assert!(!Error::ClientBuild("bad options".to_string()).is_recoverable());
+    }
+
+    #[test]
+    fn transient_errors_are_recoverable() {
+        assert!(Error::Connect {
+            endpoint: "opc.tcp://host:4840".to_string(),
+            status: StatusCode::BadNotConnected,
+        }
+        .is_recoverable());
+        assert!(Error::InternalPanic("boom".to_string()).is_recoverable());
+        assert!(Error::MissingSink.is_recoverable());
+    }
+}
